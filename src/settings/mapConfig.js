@@ -6,7 +6,7 @@
 */
 
 export default {
-    APIKEY:'6bf4381b93af415893b87f19a2d19872',
+    APIKEY:'',
     TILEURL: 'https://tile.thunderforest.com/outdoors/',
     TILESIZE: 256,
     TILEDIR: 'outdoors/tiles',
