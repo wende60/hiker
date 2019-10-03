@@ -1,0 +1,289 @@
+import React, { PureComponent } from 'react';
+import { Text, PanResponder, Animated, View, StyleSheet } from 'react-native';
+import { FileSystem } from 'expo';
+import osmHelper from 'helper/osmHelper.js';
+import gridHelper from 'helper/gridHelper.js';
+import defaultImage from 'assets/_wende60.jpg';
+import Tiles from 'components/Tiles.js';
+import Overlay from 'components/Overlay.js';
+import CONST from 'settings/mapConfig.js';
+
+const createArrayDeepClone = data => {
+    return data.map(subarr => {
+        return subarr.slice();
+    }).slice();
+}
+
+class Grid extends PureComponent {
+    constructor(props) {
+        super(props);
+        this.resetRunner = null;
+        this.state = {
+            pan: new Animated.ValueXY(),
+            gridData: null,
+            size: null,
+            url: null,
+            center: null,
+            displayInfo: false
+        };
+
+        this.gridCalculator = null;
+
+        this._panResponder = PanResponder.create({
+            onMoveShouldSetResponderCapture: () => true,
+            onMoveShouldSetPanResponderCapture: () => true,
+
+            // Initially, set the value of x and y to 0 (the center of the screen)
+            onPanResponderGrant: (e, gestureState) => {
+                // Set the initial value to the current state
+                this.state.pan.setOffset({
+                    x: this.state.pan.x._value,
+                    y: this.state.pan.y._value
+                });
+                this.state.pan.setValue({ x: 0, y: 0 });
+            },
+
+            // When we drag/pan the object, set the delate to the states pan position
+            onPanResponderMove: Animated.event([
+                null,
+                {
+                    dx: this.state.pan.x,
+                    dy: this.state.pan.y
+                },
+            ]),
+
+            onPanResponderRelease: e => {
+                // Flatten the offset to avoid erratic behavior
+                this.state.pan.flattenOffset();
+
+                clearTimeout(this.resetRunner);
+                this.resetRunner = setTimeout(() => { this.resetGrid(); }, 200)
+            }
+        });
+    }
+
+    componentDidMount() {
+        this.props.locationCallback(this.prepareGrid);
+        this.state.pan.addListener(this.handlePanChange);
+    }
+
+    handlePanChange = value => {
+        const { width, height } = this.state.size;
+        const { gridData } = this.state;
+
+        this.shiftPanX = value.x > 0;
+        this.shiftPanY = value.y > 0;
+        const outOfX = this.shiftPanX || gridData.size.x + value.x < width;
+        const outOfY = this.shiftPanY || gridData.size.y + value.y < height;
+
+        if (outOfX || outOfY) {
+            const gridDeepCopy = createArrayDeepClone(gridData.grid);
+            const dataClone = {
+                grid: gridDeepCopy,
+                size: { ...gridData.size }
+            }
+
+            const data = this.gridCalculator.addNewTiles(dataClone, value);
+            const prevGrid = this.state.gridData.grid;
+
+            this.setState(
+                { gridData: { ...data }},
+                () => { this.shiftPanWhileDragging(value); }
+            );
+        }
+    };
+
+    shiftPanWhileDragging(value) {
+        /*
+            north or west was add
+            update pan while dragging
+        */
+        if (this.shiftPanX || this.shiftPanY) {
+            const yVal = this.shiftPanY
+                ? value.y - CONST.TILESIZE - this.state.pan.y._value
+                : value.y - this.state.pan.y._value
+            const xVal = this.shiftPanX
+                ? value.x - CONST.TILESIZE - this.state.pan.x._value
+                : value.x - this.state.pan.x._value
+
+            this.shiftPanX = false;
+            this.shiftPanY = false;
+
+            this.state.pan.setOffset({
+                x: xVal,
+                y: yVal
+            });
+        }
+    }
+
+    componentDidUpdate(prevProps, prevState) {
+        if (this.state.size !== prevState.size) {
+            const { width, height } = this.state.size;
+            this.gridCalculator = gridHelper(CONST.TILESIZE, width, height);
+            this.prepareGrid(this.props.location);
+        }
+        if (this.props.zoom !== prevProps.zoom) {
+            this.handleZoomChange();
+        }
+    }
+
+    componentWillUnmount() {
+        this.state.pan.removeAllListeners();
+    }
+
+    onLayoutHandler = e => {
+        const { width, height } = e.nativeEvent.layout;
+        this.setState({ size: {
+            width,
+            height
+        }});
+    };
+
+    handleZoomChange() {
+        const latitude = this.state.center.latLon.lat;
+        const longitude = this.state.center.latLon.lon;
+        this.prepareGrid({ latitude, longitude });
+    }
+
+    setMapCenter() {
+        const { gridData } = this.state;
+        const currentOffset = {
+            x: this.state.pan.x._value,
+            y: this.state.pan.y._value
+        };
+
+        const center = this.gridCalculator.calculateNewCenter(gridData, currentOffset);
+        center.latLon = osmHelper.xyToLatLon (
+            center.x + center.frX,
+            center.y + center.frY,
+            this.props.zoom
+        );
+        this.setState({ center });
+        return center;
+    }
+
+    getLocationXY(location) {
+        const { latitude, longitude } = location;
+        const { tileX, tileY } = osmHelper.latLonToXY(
+            latitude,
+            longitude,
+            this.props.zoom
+        );
+        const locationPxOffset = osmHelper.getPixelOffset(
+            latitude,
+            longitude,
+            this.props.zoom
+        );
+        return {
+            x: tileX,
+            y: tileY,
+            ...locationPxOffset
+        }
+    }
+
+    prepareGrid = async(location) => {
+        const locationXY = this.getLocationXY(location);
+        await this.createGrid(locationXY);
+
+        /* after inital create set center  */
+        this.setMapCenter();
+    };
+
+    resetGrid = () => {
+        const center = this.setMapCenter();
+        this.createGrid(center);
+    };
+
+    createGrid = async({ x, y, pxX, pxY }) => {
+        const initialData = { grid: [[{ x, y }]] };
+        const { data, offset } = this.gridCalculator.initialGrid(initialData, { pxX, pxY });
+
+        await this.setState({ gridData: { ...data }});
+
+        this.state.pan.setOffset({ ...offset });
+        this.state.pan.setValue({ x: 0, y: 0 });
+        this.state.pan.flattenOffset();
+    }
+
+    createDragableGridContent() {
+        const { grid } = this.state.gridData;
+        const contentStyle = {
+            transform: [
+                { translateX: this.state.pan.x },
+                { translateY: this.state.pan.y }
+            ]
+        };
+
+        const height = grid ? grid.length * CONST.TILESIZE : '100%';
+        const width = grid ? grid[0].length * CONST.TILESIZE : '100%';
+
+        return (
+            <Animated.View
+                style={{
+                    width,
+                    height,
+                    ...contentStyle
+                }}
+            >
+                <Tiles gridData={this.state.gridData} zoom={this.props.zoom} />
+                <Overlay
+                    gridData={this.state.gridData}
+                    location={this.props.location}
+                    zoom={this.props.zoom} />
+            </Animated.View >
+        );
+    }
+
+    render() {
+        return (
+            <View
+                style={styles.gridWrapper}
+                onLayout={this.onLayoutHandler}
+                {...this._panResponder.panHandlers}>
+                {this.state.gridData && this.createDragableGridContent()}
+                <View style={styles.centerVertical}>
+                    <View style={styles.centerHorizontal} />
+                </View>
+            </View>
+        );
+    }
+}
+
+const styles = StyleSheet.create({
+    gridWrapper: {
+        flex: 1,
+        width: '100%'
+    },
+    info: {
+        position: 'absolute',
+        left: '50%',
+        top: '50%',
+        backgroundColor: 'white',
+        padding: 5,
+        opacity: 0.5,
+        borderRadius: 5
+    },
+    centerVertical: {
+        position: 'absolute',
+        top: '50%',
+        left: '50%',
+        height: 40,
+        width: 0,
+        marginTop: -20,
+        marginLeft: 1,
+        borderLeftColor: 'black',
+        borderLeftWidth: 2,
+        overflow: 'visible',
+    },
+    centerHorizontal: {
+        height: 0,
+        width: 40,
+        marginTop: 19,
+        marginLeft: -21,
+        borderTopColor: 'black',
+        borderTopWidth: 2,
+    }
+});
+
+export default Grid;
+

@@ -1,0 +1,6 @@
+# gitignore hiker
+
+node_modules
+apiKey.js
+
+
